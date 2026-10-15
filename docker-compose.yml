@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: email
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-email}  # dev default; override for anything shared
+      POSTGRES_DB: email_automation
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"   # localhost only
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U email -d email_automation"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      args:
+        INSTALL_DEV: "true"
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://email:${POSTGRES_PASSWORD:-email}@db:5432/email_automation
+      TEST_DATABASE_URL: postgresql+psycopg://email:${POSTGRES_PASSWORD:-email}@db:5432/email_automation_test
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

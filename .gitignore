@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# n8n raw exports may contain credentials; only commit sanitized ones
+n8n/*.raw.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code per-machine settings
+.claude/settings.local.json
+CLAUDE.md
+SDP.md
