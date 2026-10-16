@@ -24,4 +24,3 @@ Thumbs.db
 # Claude Code per-machine settings
 .claude/settings.local.json
 CLAUDE.md
-SDP.md
