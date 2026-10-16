@@ -14,7 +14,11 @@ class Settings(BaseSettings):
     api_key: SecretStr = Field(min_length=16)
 
     gemini_api_key: SecretStr | None = None
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-flash-lite-latest"
+    # Fallback when Gemini fails: any OpenAI-compatible API (Groq by default, or OpenRouter).
+    fallback_llm_api_key: SecretStr | None = None
+    fallback_llm_base_url: str = "https://api.groq.com/openai/v1"
+    fallback_llm_model: str = "openai/gpt-oss-120b"
     llm_timeout_s: float = Field(default=30.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=1, le=10)
 
