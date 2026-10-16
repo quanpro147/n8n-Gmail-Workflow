@@ -1,0 +1,522 @@
+{
+  "name": "Google Email Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0a7455b4-7b4a-42e0-9ff3-b0720229bc1f",
+              "name": "message_id",
+              "value": "={{ $json.id }}",
+              "type": "string"
+            },
+            {
+              "id": "0781d65d-f8d5-4cf3-91ea-261335d3d2a3",
+              "name": "subject",
+              "value": "={{ $json.subject ?? $json.Subject ?? '' }}",
+              "type": "string"
+            },
+            {
+              "id": "8981932a-ed7d-4e76-a6d6-43e032c465bd",
+              "name": "body",
+              "value": "={{ ($json.text ?? '').trim() || ($json.html ?? '').replace(/<(style|script)[\\s\\S]*?<\\/\\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\\s+/g, ' ').trim() || $json.snippet || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "778b17b1-5a20-4529-91d3-074d41ce2823",
+              "name": "sender",
+              "value": "={{ $json.from?.text ?? $json.From ?? '' }}",
+              "type": "string"
+            },
+            {
+              "id": "537ba666-6ef1-4042-beec-5dff995e37a8",
+              "name": "received_at",
+              "value": "={{ $json.date ? new Date($json.date).toISOString() : new Date(Number($json.internalDate)).toISOString() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "f58bc73f-3722-443c-8591-4b97d54e2503",
+      "name": "Edit Fields1"
+    },
+    {
+      "parameters": {
+        "chatId": "<YOUR_TELEGRAM_CHAT_ID>",
+        "text": "=📧 {{ String($json.subject ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }}\nFrom: {{ String($json.sender ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }}\nCategory: {{ $json.category }} | Priority: {{ $json.priority }}\n{{ String($json.summary ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2000,
+        -208
+      ],
+      "id": "ab474cf9-5694-49d1-b45d-f273d3b41850",
+      "name": "Send a text message",
+      "webhookId": "33b50603-992d-4c5c-ad8f-76ed4716cac1",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 12
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        656,
+        0
+      ],
+      "id": "4160b83e-a47a-40c4-8573-bd3b846fd2c3",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "limit": 20,
+        "simple": false,
+        "filters": {
+          "readStatus": "unread"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        0
+      ],
+      "id": "26de61ba-7276-4f39-98ed-707171b64e71",
+      "name": "Get many messages",
+      "webhookId": "dcfe367a-9deb-4fe4-acb7-52c9fbf129c6",
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/v1/emails/process",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message_id: $json.message_id, subject: $json.subject, body: $json.body, sender: $json.sender, received_at: $json.received_at }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 12000
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1376,
+        0
+      ],
+      "id": "7096e950-5ade-4b2d-8184-cad84a8546bc",
+      "name": "HTTP Request",
+      "retryOnFail": false,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $('Edit Fields1').item.json.message_id }}"
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2480,
+        0
+      ],
+      "id": "3f7ab42c-9a89-427d-8dff-7e13d9b7a856",
+      "name": "Mark a message as read",
+      "webhookId": "caa21694-8313-41ad-8db1-9a2b1e5242a1",
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "<YOUR_TELEGRAM_CHAT_ID>",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1840,
+        224
+      ],
+      "id": "d20c2a80-93c9-4571-9c92-89e748ad2f23",
+      "name": "Alert backend error",
+      "webhookId": "7b9cc05d-dda7-419b-8a3f-25d7f635ddcc",
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c1",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "notify",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "id": "c2",
+                    "leftValue": "={{ $json.notification_status }}",
+                    "rightValue": "SENT",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEquals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "notify"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c3",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "review",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "review"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "ignore / already sent"
+        }
+      },
+      "id": "9268e922-8b48-4445-bf5d-9bb130ac2c72",
+      "name": "Route by action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1680,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "<YOUR_TELEGRAM_CHAT_ID>",
+        "text": "=🔎 Needs review: {{ String($json.subject ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }}\nFrom: {{ String($json.sender ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }}\nReason: {{ String($json.reason ?? 'analysis unavailable').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "f35d56f0-1d75-4055-b6a8-0653a2794ddc",
+      "name": "Send review message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2000,
+        0
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "webhookId": "45cea15b-8a6f-4afa-8fd0-9b75d71f55d0",
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://host.docker.internal:8000/api/v1/emails/{{ encodeURIComponent($('Edit Fields1').item.json.message_id) }}/notification",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"delivered\": true}",
+        "options": {}
+      },
+      "id": "ad3bbc2b-7224-4039-a0b3-bf6fbc03879c",
+      "name": "Report delivered",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2240,
+        -288
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://host.docker.internal:8000/api/v1/emails/{{ encodeURIComponent($('Edit Fields1').item.json.message_id) }}/notification",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivered: false, error: String(typeof $json.error === 'string' ? $json.error : ($json.error?.message ?? 'Telegram send failed')).slice(0, 500) }) }}",
+        "options": {}
+      },
+      "id": "02935133-861d-4a08-a8c5-952bf38f8878",
+      "name": "Report failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2240,
+        -128
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// One Telegram alert per run instead of one per failed email.\nconst MAX_LINES = 30;\nconst esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\nconst items = $input.all();\nconst lines = items.slice(0, MAX_LINES).map((item, index) => {\n  const err = item.json.error;\n  const raw = typeof err === 'string' ? err : (err?.message ?? 'unknown error');\n  const match = raw.match(/code\\\\*\"\\s*:\\s*\\\\*\"([A-Z_]+)/);\n  const reason = match ? match[1] : raw.slice(0, 120);\n  const messageId = $('Edit Fields1').itemMatching(index)?.json.message_id ?? '?';\n  return `• ${esc(messageId)}: ${esc(reason)}`;\n});\nif (items.length > MAX_LINES) lines.push(`…and ${items.length - MAX_LINES} more`);\n\nconst text = [\n  `⚠️ ${items.length} email(s) failed backend processing:`,\n  ...lines,\n  'They stay unread and are retried next run. MAX_ATTEMPTS_EXCEEDED needs POST /api/v1/emails/{id}/retry.',\n].join('\\n');\n\nreturn [{ json: { text } }];"
+      },
+      "id": "fd15ff48-c78e-46cb-b0ea-e5d7f3c8ca8c",
+      "name": "Summarize errors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        224
+      ]
+    }
+  ],
+  "connections": {
+    "Edit Fields1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get many messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get many messages": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Route by action",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Summarize errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by action": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send review message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark a message as read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a text message": {
+      "main": [
+        [
+          {
+            "node": "Report delivered",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report delivered": {
+      "main": [
+        [
+          {
+            "node": "Mark a message as read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send review message": {
+      "main": [
+        [
+          {
+            "node": "Mark a message as read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize errors": {
+      "main": [
+        [
+          {
+            "node": "Alert backend error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": true
+  },
+  "tags": [
+    {
+      "name": "Daily"
+    }
+  ],
+  "pinData": {}
+}

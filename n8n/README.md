@@ -3,6 +3,15 @@
 n8n handles Gmail retrieval, scheduling and Telegram. The backend decides everything else.
 Put sanitized workflow exports in this folder (strip credential IDs and tokens before committing).
 
+## Importing `gmail-workflow.json`
+1. n8n → **Workflows → ⋯ → Import from File** (or `n8n import:workflow --input=gmail-workflow.json`).
+2. Create three credentials and select them on the nodes that show a warning:
+   - **Gmail account**: Gmail OAuth2.
+   - **Telegram account**: your bot token.
+   - **Header Auth account**: Header Auth with name `X-API-Key` and the backend's `API_KEY` as the value.
+3. Replace `<YOUR_TELEGRAM_CHAT_ID>` in the three Telegram nodes with your chat ID.
+4. If the backend isn't on `http://host.docker.internal:8000`, change the URL in the three HTTP Request nodes.
+
 ## Workflow outline
 
 1. **Schedule Trigger**: every 12 hours.
