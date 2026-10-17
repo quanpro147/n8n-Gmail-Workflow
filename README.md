@@ -108,6 +108,42 @@ The model still sees the argument-free `lookup_email_history`. The backend fills
 
 If the MCP server is unreachable or answers with an error, the tool returns `{"error": "History unavailable"}`, a warning is logged (`outcome: mcp_unavailable`), and the email is still classified. If `MCP_SERVER_URL` is blank, the tool reads the DB directly.
 
+## Observability
+The backend and MCP server log one JSON object per line to stdout. Only allow-listed keys are emitted, never bodies or credentials. These lines trace one email through the agent:
+
+| Line | Service | Key fields |
+|---|---|---|
+| `Agent tool call` | backend | `tool_name`, `round`, `provider`: the model requested a tool |
+| `LLM call failed, retrying` | backend | `attempt`, `error_code`, `outcome: llm_retry` |
+| `mcp search_email_history` / `mcp get_email_details` | mcp | `tool_name`, `filters` (names only), `outcome`, `duration_ms` |
+| `Email processed` | backend | `tool_calls`, `provider`, `model`, `llm_calls`, `llm_retries`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `analysis_ms` |
+
+While processing an email, the backend sets `correlation_id` to its `message_id` and forwards it to the MCP server as `X-Correlation-ID`. To see both services' lines for one email:
+
+```bash
+docker compose logs --no-log-prefix backend mcp | grep <message_id>
+```
+
+[docs/demo-tool-calling.md](docs/demo-tool-calling.md) is a live walkthrough: the agent calls the history tool through MCP, and Claude Code queries the same server.
+
+Token counts come from the provider's usage fields. Gemini thinking tokens count as completion tokens. Retries made inside the `openai` client (fallback) are not counted. If the fallback takes over, the failed primary attempt's tokens are not included.
+
+## Evaluation
+[backend/eval/dataset.jsonl](backend/eval/dataset.jsonl) holds 30 synthetic, labeled emails (EN + VI) that cover:
+- every category and priority
+- prompt-injection attempts
+- urgent-looking promotions
+- follow-ups whose label depends on sender history
+
+The benchmark runs the real analyzer and business rules in-process. Each case supplies its own history, so it doesn't touch the DB or MCP. It reports accuracy (category, priority, action), the action confusion matrix, latency p50/p95, token usage, LLM errors/retries/fallbacks, and tool-call precision/recall.
+
+```bash
+cd backend
+python -m eval.run_benchmark --provider auto      # auto = Gemini + fallback (production); or gemini | fallback
+python -m eval.run_benchmark --limit 5 --delay 0  # quick smoke run
+```
+Results (no email text) go to `backend/eval/results/<timestamp>-<provider>/`: `results.jsonl`, `summary.json`, `report.md`, `warnings.jsonl`. Latest numbers and analysis: [docs/evaluation.md](docs/evaluation.md). The benchmark calls the real LLM APIs; `--delay` keeps it under free-tier rate limits.
+
 ## Configuration
 See [backend/.env.example](backend/.env.example).
 
@@ -138,6 +174,7 @@ docker compose up -d db                             # tests need the email_autom
 pytest --cov=app                                    # all tests
 pytest tests/test_processing.py::test_stale_processing_record_is_reclaimed   # one test
 pytest tests/test_mcp_server.py tests/test_mcp_history.py   # MCP server + backend MCP client
+pytest --cov=app --cov=mcp_server --cov=eval        # with coverage of every package
 ```
 Inside Docker: `docker compose exec backend pytest`.
 

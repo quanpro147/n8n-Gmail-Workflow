@@ -11,7 +11,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Protocol
 
 import httpx
@@ -19,7 +19,13 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import ValidationError
-from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.core.config import Settings
 from app.schemas.email import AgentAnalysis, EmailIn
@@ -30,6 +36,7 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 2
 MAX_STRUCTURED_ATTEMPTS = 2
 TRANSIENT_HTTP_CODES = frozenset({408, 429})
+MAX_LOGGED_TOOL_NAME = 64
 
 SYSTEM_INSTRUCTION = """You are an email triage assistant. You classify ONE email for its recipient.
 
@@ -64,11 +71,40 @@ class AnalysisError(Exception):
 
 
 @dataclass(frozen=True)
+class LlmUsage:
+    """LLM calls and tokens spent on one email. `retries` counts failed attempts we retried."""
+
+    calls: int = 0
+    retries: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def __add__(self, other: "LlmUsage") -> "LlmUsage":
+        return LlmUsage(
+            **{f.name: getattr(self, f.name) + getattr(other, f.name) for f in fields(self)}
+        )
+
+
+class UsageMeter:
+    """Per-`analyze()` accumulator (analyzers are shared across request threads)."""
+
+    def __init__(self) -> None:
+        self.usage = LlmUsage()
+
+    def add(self, usage: LlmUsage) -> None:
+        self.usage = self.usage + usage
+
+
+@dataclass(frozen=True)
 class AnalysisOutcome:
     """`analysis` is None when the model never produced valid structured output."""
 
     analysis: AgentAnalysis | None
     tool_calls: tuple[str, ...]
+    usage: LlmUsage = LlmUsage()
+    provider: str = ""
+    model: str = ""
 
 
 HistoryLookup = Callable[[], dict]
@@ -107,6 +143,30 @@ def is_transient(exc: BaseException) -> bool:
     return isinstance(exc, genai_errors.ClientError) and exc.code in TRANSIENT_HTTP_CODES
 
 
+def log_tool_call(name: str | None, *, message_id: str, round_no: int, provider: str) -> bool:
+    """Log the model's tool request; return whether the tool is permitted."""
+    permitted = name == HISTORY_TOOL_NAME
+    # The name is model output (steerable by the email), so a rejected one is truncated.
+    logged_name = name if permitted else (name or "")[:MAX_LOGGED_TOOL_NAME]
+    extra = {"message_id": message_id, "tool_name": logged_name, "round": round_no, "provider": provider}
+    if permitted:
+        logger.info("Agent tool call", extra=extra)
+    else:
+        logger.warning("Model requested a non-permitted tool", extra={**extra, "outcome": "tool_rejected"})
+    return permitted
+
+
+def gemini_usage(response: Any) -> LlmUsage:
+    """Gemini bills thinking tokens as output, so they count as completion tokens."""
+    meta = getattr(response, "usage_metadata", None)
+    prompt = getattr(meta, "prompt_token_count", None) or 0
+    completion = (getattr(meta, "candidates_token_count", None) or 0) + (
+        getattr(meta, "thoughts_token_count", None) or 0
+    )
+    total = getattr(meta, "total_token_count", None) or prompt + completion
+    return LlmUsage(calls=1, prompt_tokens=prompt, completion_tokens=completion, total_tokens=total)
+
+
 def _with_user_text(contents: list[types.Content], text: str) -> list[types.Content]:
     """Return a new contents list ending in a user turn that includes `text`."""
     text_part = types.Part.from_text(text=text)
@@ -118,6 +178,8 @@ def _with_user_text(contents: list[types.Content], text: str) -> list[types.Cont
 
 
 class GeminiAnalyzer:
+    PROVIDER = "gemini"
+
     def __init__(
         self,
         client: Any,
@@ -156,27 +218,44 @@ class GeminiAnalyzer:
     def analyze(self, email: EmailIn, history_lookup: HistoryLookup) -> AnalysisOutcome:
         email_part = types.Part.from_text(text=render_email(email, self._max_body_chars))
         email_content = types.Content(role="user", parts=[email_part])
-        tool_results, tool_calls = self._run_tool_phase(email_content, history_lookup)
-        analysis = self._run_structured_phase(email_content, tool_results)
-        return AnalysisOutcome(analysis=analysis, tool_calls=tool_calls)
+        meter = UsageMeter()
+        tool_results, tool_calls = self._run_tool_phase(
+            email_content, history_lookup, email.message_id, meter
+        )
+        analysis = self._run_structured_phase(email_content, tool_results, meter)
+        return AnalysisOutcome(
+            analysis=analysis,
+            tool_calls=tool_calls,
+            usage=meter.usage,
+            provider=self.PROVIDER,
+            model=self._model,
+        )
 
     def _run_tool_phase(
-        self, email_content: types.Content, history_lookup: HistoryLookup
+        self,
+        email_content: types.Content,
+        history_lookup: HistoryLookup,
+        message_id: str,
+        meter: UsageMeter,
     ) -> tuple[tuple[dict, ...], tuple[str, ...]]:
         conversation = _with_user_text([email_content], TOOL_PHASE_PROMPT)
         results: list[dict] = []
         used: list[str] = []
-        for _ in range(MAX_TOOL_ROUNDS):
-            response = self._generate(conversation, self._tool_config)
+        for round_no in range(1, MAX_TOOL_ROUNDS + 1):
+            response = self._generate(conversation, self._tool_config, meter)
             calls = response.function_calls or []
             if not calls:
                 break
             responses = []
             for call in calls:
-                result = self._execute_tool(call.name, history_lookup)
-                if call.name == HISTORY_TOOL_NAME:
+                if log_tool_call(
+                    call.name, message_id=message_id, round_no=round_no, provider=self.PROVIDER
+                ):
+                    result = history_lookup()
                     used.append(call.name)
                     results.append(result)
+                else:
+                    result = {"error": "Tool not permitted"}
                 responses.append(types.Part.from_function_response(name=call.name, response=result))
             conversation = [
                 *conversation,
@@ -185,15 +264,8 @@ class GeminiAnalyzer:
             ]
         return tuple(results), tuple(used)
 
-    @staticmethod
-    def _execute_tool(name: str | None, history_lookup: HistoryLookup) -> dict:
-        if name != HISTORY_TOOL_NAME:
-            logger.warning("Model requested a non-permitted tool", extra={"outcome": "tool_rejected"})
-            return {"error": "Tool not permitted"}
-        return history_lookup()
-
     def _run_structured_phase(
-        self, email_content: types.Content, tool_results: tuple[dict, ...]
+        self, email_content: types.Content, tool_results: tuple[dict, ...], meter: UsageMeter
     ) -> AgentAnalysis | None:
         # Tool results are passed as plain text: a request without `tools` should not
         # carry function_call/function_response parts.
@@ -206,30 +278,48 @@ class GeminiAnalyzer:
             )
         conversation = _with_user_text(contents, FINAL_PROMPT)
         for attempt in range(MAX_STRUCTURED_ATTEMPTS):
-            response = self._generate(conversation, self._structured_config)
+            response = self._generate(conversation, self._structured_config, meter)
             try:
                 return AgentAnalysis.model_validate_json(response.text or "")
             except ValidationError:
                 logger.warning(
                     "Model returned invalid structured output",
-                    extra={"attempt": attempt + 1, "outcome": "invalid_output"},
+                    extra={"attempt": attempt + 1, "outcome": "invalid_output", "provider": self.PROVIDER},
                 )
                 conversation = _with_user_text(conversation, RETRY_PROMPT)
         return None
 
-    def _generate(self, contents: list[types.Content], config: types.GenerateContentConfig):
+    def _generate(
+        self, contents: list[types.Content], config: types.GenerateContentConfig, meter: UsageMeter
+    ):
+        def before_retry(state: RetryCallState) -> None:
+            meter.add(LlmUsage(retries=1))
+            exc = state.outcome.exception() if state.outcome else None
+            logger.warning(
+                "LLM call failed, retrying",
+                extra={
+                    "attempt": state.attempt_number,
+                    "outcome": "llm_retry",
+                    "error_code": type(exc).__name__,
+                    "provider": self.PROVIDER,
+                },
+            )
+
         retrying = Retrying(
             stop=stop_after_attempt(self._max_retries),
             wait=self._retry_wait,
             retry=retry_if_exception(is_transient),
+            before_sleep=before_retry,
             reraise=True,
         )
         try:
             for attempt in retrying:
                 with attempt:
-                    return self._client.models.generate_content(
+                    response = self._client.models.generate_content(
                         model=self._model, contents=contents, config=config
                     )
+                    meter.add(gemini_usage(response))
+                    return response
         except Exception as exc:
             if is_transient(exc):
                 raise AnalysisError(

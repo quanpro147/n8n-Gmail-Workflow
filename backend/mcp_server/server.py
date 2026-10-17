@@ -5,6 +5,7 @@ error the client can read). Cross-field checks the hints can't express raise `To
 """
 
 import logging
+import time
 from collections.abc import Callable
 from datetime import datetime
 from email.utils import parseaddr
@@ -56,6 +57,23 @@ def check_date_range(received_after: datetime | None, received_before: datetime 
         raise ToolError("received_after must be earlier than received_before.")
 
 
+def used_filter_names(filters: EmailSearchFilters) -> list[str]:
+    """Which filters a search used. Names only: values (e.g. sender addresses) stay out of logs."""
+    return [name for name, value in vars(filters).items() if value is not None]
+
+
+def log_tool_call(tool_name: str, started: float, *, outcome: str, **extra: object) -> None:
+    logger.info(
+        f"mcp {tool_name}",
+        extra={
+            "tool_name": tool_name,
+            "outcome": outcome,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            **extra,
+        },
+    )
+
+
 def build_server(session_factory: Callable[[], Session], *, max_results: int) -> MCPServer:
     """`session_factory` should hand out read-only sessions (see `__main__`)."""
     mcp = MCPServer(
@@ -70,12 +88,14 @@ def build_server(session_factory: Callable[[], Session], *, max_results: int) ->
     @mcp.tool(annotations=READ_ONLY)
     def get_email_details(message_id: MessageId) -> EmailDetails:
         """Return the stored processing result for one email, looked up by Gmail message ID."""
+        started = time.perf_counter()
         with session_factory() as session:
             record = EmailRepository(session).get_by_message_id(message_id)
             if record is None:
+                log_tool_call("get_email_details", started, outcome="not_found")
                 raise ToolError(f"No processed email has message_id {message_id!r}.")
             details = EmailDetails.model_validate(record)
-        logger.info("mcp get_email_details", extra={"outcome": "found"})
+        log_tool_call("get_email_details", started, outcome="found")
         return details
 
     @mcp.tool(annotations=READ_ONLY)
@@ -95,6 +115,7 @@ def build_server(session_factory: Callable[[], Session], *, max_results: int) ->
         with AND; `received_after` is inclusive and `received_before` exclusive. Returns
         classification metadata only; call get_email_details for a single email's summary.
         """
+        started = time.perf_counter()
         check_date_range(received_after, received_before)
         filters = EmailSearchFilters(
             sender_address=normalize_sender(sender) if sender else None,
@@ -109,7 +130,12 @@ def build_server(session_factory: Callable[[], Session], *, max_results: int) ->
             # One extra row tells us whether the limit cut the result short.
             rows = EmailRepository(session).search(filters, limit=limit + 1)
             records = [EmailHistoryItem.model_validate(row) for row in rows[:limit]]
-        logger.info("mcp search_email_history", extra={"outcome": f"{len(records)} records"})
+        log_tool_call(
+            "search_email_history",
+            started,
+            outcome=f"{len(records)} records",
+            filters=used_filter_names(filters),
+        )
         return EmailSearchResult(
             count=len(records), limit=limit, has_more=len(rows) > limit, records=records
         )

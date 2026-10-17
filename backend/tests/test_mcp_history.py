@@ -1,3 +1,4 @@
+import json
 import logging
 import socket
 import threading
@@ -12,6 +13,7 @@ from pydantic import SecretStr, ValidationError
 
 from app.api import deps
 from app.core.config import Settings, get_settings
+from app.core.logging import correlation_id
 from app.db.models import EmailRecord
 from app.db.session import get_sessionmaker
 from app.repositories.email_repository import EmailRepository
@@ -20,7 +22,7 @@ from app.tools.email_history import lookup_email_history
 from app.tools.mcp_history import UNAVAILABLE, McpHistoryLookup, http_connector
 from mcp_server.app import build_app
 from mcp_server.server import build_server
-from tests.conftest import FakeAnalyzer, email_payload
+from tests.conftest import FakeAnalyzer, captured_json_logs, email_payload
 
 TOKEN = "mcp-test-token-0123456789"
 BASE_TIME = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
@@ -252,3 +254,23 @@ def test_settings_parse_extra_allowed_hosts():
     settings = Settings(_env_file=None, mcp_allowed_hosts=" mcp:* , ,backend:8001")
 
     assert settings.mcp_extra_allowed_hosts == ("mcp:*", "backend:8001")
+
+
+def test_http_lookup_tags_mcp_server_logs_with_the_email_message_id(http_url, add_record):
+    # Backend and MCP server logs can be joined on correlation_id == message_id.
+    add_record("msg-1")
+    lookup = McpHistoryLookup(http_connector(http_url, token=TOKEN, timeout_s=5))
+
+    token = correlation_id.set("current-email")
+    try:
+        with captured_json_logs("mcp_server.server") as lines:
+            lookup(sender_address=SENDER, exclude_message_id="current-email", limit=5)
+    finally:
+        correlation_id.reset(token)
+
+    search = next(line for line in lines if line["msg"] == "mcp search_email_history")
+    assert search["correlation_id"] == "current-email"
+    assert search["tool_name"] == "search_email_history"
+    assert search["filters"] == ["sender_address", "status"]  # names only, never values
+    assert SENDER not in json.dumps(search)
+    assert search["duration_ms"] >= 0

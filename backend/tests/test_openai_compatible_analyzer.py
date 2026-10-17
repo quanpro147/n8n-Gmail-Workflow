@@ -1,3 +1,4 @@
+import logging
 import json
 from types import SimpleNamespace
 
@@ -284,3 +285,60 @@ def test_permanent_api_error_raises_rejected_analysis_error(error):
     assert exc_info.value.code == "LLM_REQUEST_REJECTED"
     assert exc_info.value.transient is False
     assert len(completions.requests) == 1
+
+
+# --- observability: usage, tool-call log ----------------------------------------
+
+
+def with_usage(response, *, prompt: int, completion: int):
+    response.usage = SimpleNamespace(
+        prompt_tokens=prompt, completion_tokens=completion, total_tokens=prompt + completion
+    )
+    return response
+
+
+def test_usage_is_summed_over_every_call_of_one_email():
+    analyzer, _ = make_analyzer(
+        [
+            with_usage(tool_completion("lookup_email_history"), prompt=200, completion=10),
+            with_usage(text_completion("READY"), prompt=250, completion=2),
+            with_usage(text_completion(VALID_JSON), prompt=300, completion=80),
+        ]
+    )
+
+    outcome = analyzer.analyze(email(), lambda: {"count": 0, "records": []})
+
+    assert outcome.provider == "fallback"
+    assert outcome.model == "test-model"
+    assert outcome.usage.calls == 3
+    assert outcome.usage.prompt_tokens == 750
+    assert outcome.usage.completion_tokens == 92
+    assert outcome.usage.total_tokens == 842
+
+
+def test_call_rejected_for_malformed_output_still_counts_as_a_call():
+    analyzer, _ = make_analyzer(
+        [
+            status_error(openai.BadRequestError, 400, "tool_use_failed"),
+            text_completion(VALID_JSON),
+        ]
+    )
+
+    outcome = analyzer.analyze(email(), no_history)
+
+    assert outcome.usage.calls == 2
+    assert outcome.usage.total_tokens == 0
+
+
+def test_tool_call_is_logged_with_round_and_provider(caplog):
+    analyzer, _ = make_analyzer(
+        [tool_completion("lookup_email_history"), text_completion("READY"), text_completion(VALID_JSON)]
+    )
+
+    with caplog.at_level(logging.INFO):
+        analyzer.analyze(email(), lambda: {"count": 0, "records": []})
+
+    calls = [r for r in caplog.records if r.message == "Agent tool call"]
+    assert [(r.tool_name, r.round, r.provider) for r in calls] == [
+        ("lookup_email_history", 1, "fallback")
+    ]

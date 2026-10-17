@@ -17,11 +17,13 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel, ValidationError
 
+from app.core.logging import correlation_id
 from app.schemas.email import ProcessingStatus
 
 logger = logging.getLogger(__name__)
 
 SEARCH_TOOL_NAME = "search_email_history"
+CORRELATION_HEADER = "X-Correlation-ID"
 UNAVAILABLE = {"error": "History unavailable"}
 
 ClientConnector = Callable[[], AbstractAsyncContextManager[Client]]
@@ -44,11 +46,17 @@ class _SearchResult(BaseModel):
 
 
 def http_connector(url: str, *, token: str, timeout_s: float) -> ClientConnector:
-    """Connect over Streamable HTTP with the shared bearer token, one connection per call."""
+    """Connect over Streamable HTTP with the shared bearer token, one connection per call.
+
+    The current `correlation_id` (the email's message_id, set by the processor) is sent as
+    X-Correlation-ID so the MCP server's log lines can be joined with the backend's.
+    """
 
     @asynccontextmanager
     async def connect() -> AsyncIterator[Client]:
         headers = {"Authorization": f"Bearer {token}"}
+        if (current_correlation_id := correlation_id.get()) is not None:
+            headers[CORRELATION_HEADER] = current_correlation_id
         async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(timeout_s)) as http:
             transport = streamable_http_client(url, http_client=http, terminate_on_close=False)
             async with Client(transport, read_timeout_seconds=timeout_s, cache=None) as client:

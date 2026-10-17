@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import httpx
@@ -203,3 +204,107 @@ def test_render_email_neutralizes_delimiters_and_truncates_body():
     assert rendered.lower().count("</email>") == 1
     assert rendered.lower().count("<email>") == 1
     assert rendered.endswith("[truncated]\n</email>")
+
+
+# --- observability: usage, retries, tool-call log -------------------------------
+
+
+def with_usage(response, *, prompt: int, output: int, thoughts: int | None = None):
+    response.usage_metadata = SimpleNamespace(
+        prompt_token_count=prompt,
+        candidates_token_count=output,
+        thoughts_token_count=thoughts,
+        total_token_count=prompt + output + (thoughts or 0),
+    )
+    return response
+
+
+def test_usage_is_summed_over_every_call_of_one_email():
+    analyzer, _ = make_analyzer(
+        [
+            with_usage(tool_call_response("lookup_email_history"), prompt=100, output=5),
+            with_usage(text_response("READY"), prompt=150, output=1, thoughts=20),
+            with_usage(text_response(VALID_JSON), prompt=120, output=60),
+        ]
+    )
+
+    outcome = analyzer.analyze(email(), lambda: {"count": 0, "records": []})
+
+    assert outcome.provider == "gemini"
+    assert outcome.model == "gemini-test"
+    assert outcome.usage.calls == 3
+    assert outcome.usage.prompt_tokens == 370
+    assert outcome.usage.completion_tokens == 86  # thinking tokens are billed as output
+    assert outcome.usage.total_tokens == 456
+    assert outcome.usage.retries == 0
+
+
+def test_missing_usage_metadata_counts_the_call_with_zero_tokens():
+    analyzer, _ = make_analyzer([text_response("READY"), text_response(VALID_JSON)])
+
+    outcome = analyzer.analyze(email(), no_history)
+
+    assert outcome.usage.calls == 2
+    assert outcome.usage.total_tokens == 0
+
+
+def test_retries_are_counted_and_logged(caplog):
+    analyzer, _ = make_analyzer(
+        [
+            genai_errors.ServerError(503, {"error": {"message": "overloaded"}}),
+            text_response("READY"),
+            text_response(VALID_JSON),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        outcome = analyzer.analyze(email(), no_history)
+
+    assert outcome.usage.retries == 1
+    assert outcome.usage.calls == 2
+    retry_logs = [r for r in caplog.records if getattr(r, "outcome", None) == "llm_retry"]
+    assert len(retry_logs) == 1
+    assert retry_logs[0].error_code == "ServerError"
+    assert retry_logs[0].provider == "gemini"
+
+
+def test_tool_call_is_logged_with_round_and_message_id(caplog):
+    analyzer, _ = make_analyzer(
+        [tool_call_response("lookup_email_history"), text_response("READY"), text_response(VALID_JSON)]
+    )
+
+    with caplog.at_level(logging.INFO):
+        analyzer.analyze(email(), lambda: {"count": 0, "records": []})
+
+    calls = [r for r in caplog.records if r.message == "Agent tool call"]
+    assert len(calls) == 1
+    assert calls[0].tool_name == "lookup_email_history"
+    assert calls[0].round == 1
+    assert calls[0].provider == "gemini"
+    assert calls[0].message_id == email().message_id
+
+
+def test_rejected_tool_is_logged_with_its_name(caplog):
+    analyzer, _ = make_analyzer(
+        [tool_call_response("send_email"), text_response("READY"), text_response(VALID_JSON)]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        analyzer.analyze(email(), no_history)
+
+    rejected = [r for r in caplog.records if getattr(r, "outcome", None) == "tool_rejected"]
+    assert [r.tool_name for r in rejected] == ["send_email"]
+
+
+def test_rejected_tool_name_is_truncated_in_logs(caplog):
+    # A prompt-injected email could steer the model into smuggling text into the tool name.
+    long_name = "leak_" + "x" * 500
+    analyzer, _ = make_analyzer(
+        [tool_call_response(long_name), text_response("READY"), text_response(VALID_JSON)]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        analyzer.analyze(email(), no_history)
+
+    rejected = next(r for r in caplog.records if getattr(r, "outcome", None) == "tool_rejected")
+    assert len(rejected.tool_name) == 64

@@ -1,6 +1,7 @@
 """ASGI app: the MCP Streamable HTTP endpoint behind a shared bearer token."""
 
 import hmac
+import re
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
@@ -9,7 +10,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.core.logging import correlation_id
+
 MCP_PATH = "/mcp"
+# Printable ASCII without spaces, bounded like a Gmail message_id; anything else is ignored.
+_CORRELATION_ID = re.compile(r"[!-~]{1,255}")
 LOCAL_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 
 
@@ -32,6 +37,24 @@ class BearerTokenMiddleware:
                 await response(scope, receive, send)
                 return
         await self._app(scope, receive, send)
+
+
+class CorrelationIdMiddleware:
+    """Tags the request's log lines with the caller's X-Correlation-ID (if well-formed)."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        raw = dict(scope["headers"]).get(b"x-correlation-id", b"").decode("latin-1")
+        token = correlation_id.set(raw if _CORRELATION_ID.fullmatch(raw) else None)
+        try:
+            await self._app(scope, receive, send)
+        finally:
+            correlation_id.reset(token)
 
 
 def read_only_engine(database_url: str) -> Engine:
@@ -65,4 +88,4 @@ def build_app(
         json_response=True,
         transport_security=transport_security(extra_allowed_hosts),
     )
-    return BearerTokenMiddleware(starlette_app, token)
+    return BearerTokenMiddleware(CorrelationIdMiddleware(starlette_app), token)
