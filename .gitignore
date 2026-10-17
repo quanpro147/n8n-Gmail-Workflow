@@ -24,3 +24,6 @@ Thumbs.db
 # Claude Code per-machine settings
 .claude/settings.local.json
 CLAUDE.md
+
+# Local MCP client config (contains MCP_API_KEY)
+.mcp.json

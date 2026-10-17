@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 from app.core.config import Settings
 from app.core.errors import ApiError
@@ -9,7 +10,7 @@ from app.repositories.email_repository import ClaimOutcome, EmailRepository
 from app.schemas.email import EmailIn, ProcessingStatus, ProcessResponse
 from app.services.agent_service import AnalysisError, Analyzer
 from app.services.notification_rules import decide, review_decision
-from app.tools.email_history import lookup_email_history
+from app.tools.email_history import HistorySource, lookup_email_history
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,13 @@ class EmailProcessor:
         analyzer_factory: Callable[[], Analyzer],
         settings: Settings,
         clock: Clock = utc_now,
+        history_source: HistorySource | None = None,
     ) -> None:
         self._repository = repository
         self._analyzer_factory = analyzer_factory
         self._settings = settings
         self._clock = clock
+        self._history_source = history_source or partial(lookup_email_history, repository)
 
     def process(self, email: EmailIn) -> ProcessResponse:
         claim = self._repository.claim(
@@ -144,8 +147,7 @@ class EmailProcessor:
 
     def _history_lookup_for(self, email: EmailIn) -> Callable[[], dict]:
         def lookup() -> dict:
-            return lookup_email_history(
-                self._repository,
+            return self._history_source(
                 sender_address=email.sender_address,
                 exclude_message_id=email.message_id,
                 limit=self._settings.history_lookup_limit,
