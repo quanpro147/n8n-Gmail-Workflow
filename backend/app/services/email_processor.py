@@ -1,10 +1,12 @@
 import logging
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import partial
 
 from app.core.config import Settings
 from app.core.errors import ApiError
+from app.core.logging import correlation_id
 from app.db.models import EmailRecord
 from app.repositories.email_repository import ClaimOutcome, EmailRepository
 from app.schemas.email import EmailIn, ProcessingStatus, ProcessResponse
@@ -55,6 +57,14 @@ class EmailProcessor:
         self._history_source = history_source or partial(lookup_email_history, repository)
 
     def process(self, email: EmailIn) -> ProcessResponse:
+        # Tags this email's log lines, and is forwarded to the MCP server (X-Correlation-ID).
+        token = correlation_id.set(email.message_id)
+        try:
+            return self._process(email)
+        finally:
+            correlation_id.reset(token)
+
+    def _process(self, email: EmailIn) -> ProcessResponse:
         claim = self._repository.claim(
             email,
             max_attempts=self._settings.max_process_attempts,
@@ -85,7 +95,9 @@ class EmailProcessor:
     ) -> ProcessResponse:
         try:
             analyzer = self._analyzer_factory()
+            started = time.perf_counter()
             outcome = analyzer.analyze(email, history_lookup=self._history_lookup_for(email))
+            analysis_ms = round((time.perf_counter() - started) * 1000, 1)
         except AnalysisError as exc:
             self._safe_fail(email, record_id, fencing_token, exc.code, str(exc))
             raise ApiError(
@@ -115,6 +127,14 @@ class EmailProcessor:
                 "priority": completed.priority,
                 "action": completed.action,
                 "tool_calls": list(outcome.tool_calls),
+                "provider": outcome.provider,
+                "model": outcome.model,
+                "llm_calls": outcome.usage.calls,
+                "llm_retries": outcome.usage.retries,
+                "prompt_tokens": outcome.usage.prompt_tokens,
+                "completion_tokens": outcome.usage.completion_tokens,
+                "total_tokens": outcome.usage.total_tokens,
+                "analysis_ms": analysis_ms,
             },
         )
         return to_response(completed, already_processed=False)

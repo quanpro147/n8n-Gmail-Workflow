@@ -27,3 +27,6 @@ CLAUDE.md
 
 # Local MCP client config (contains MCP_API_KEY)
 .mcp.json
+
+# Benchmark run outputs (summaries are copied into docs/evaluation.md)
+backend/eval/results/

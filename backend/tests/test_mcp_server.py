@@ -11,6 +11,7 @@ from app.db.models import EmailRecord
 from app.db.session import get_sessionmaker
 from mcp_server.app import build_app, read_only_engine
 from mcp_server.server import build_server
+from tests.conftest import captured_json_logs
 
 MAX_RESULTS = 5
 TOKEN = "mcp-test-token-0123456789"
@@ -317,3 +318,44 @@ def test_http_accepts_configured_extra_host(server):
         )
 
     assert response.status_code == 200
+
+
+def _call_details(client, message_id: str, correlation: str | None):
+    headers = {**MCP_HEADERS, "Authorization": f"Bearer {TOKEN}"}
+    if correlation is not None:
+        headers["X-Correlation-ID"] = correlation
+    body = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "get_email_details", "arguments": {"message_id": message_id}},
+    }
+    return client.post("/mcp", json=body, headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [("gmail-abc123", "gmail-abc123"), ("has space", None), ("x" * 256, None), (None, None)],
+)
+def test_http_tool_logs_carry_only_well_formed_correlation_ids(
+    http_client, add_record, header, expected
+):
+    add_record("msg-1")
+
+    with captured_json_logs("mcp_server.server") as lines:
+        response = _call_details(http_client, "msg-1", header)
+
+    assert response.status_code == 200
+    details = next(line for line in lines if line["msg"] == "mcp get_email_details")
+    assert details.get("correlation_id") == expected
+    assert details["tool_name"] == "get_email_details"
+    assert details["outcome"] == "found"
+
+
+def test_http_unknown_email_is_logged_as_not_found(http_client):
+    with captured_json_logs("mcp_server.server") as lines:
+        _call_details(http_client, "missing", None)
+
+    assert [line["outcome"] for line in lines if line["msg"] == "mcp get_email_details"] == [
+        "not_found"
+    ]

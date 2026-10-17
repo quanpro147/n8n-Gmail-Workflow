@@ -2,16 +2,19 @@ import os
 
 # Configure the app for tests BEFORE any app module reads settings.
 os.environ["DATABASE_URL"] = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql+psycopg://email:email@localhost:5433/email_automation_test"
+    "TEST_DATABASE_URL", "postgresql+psycopg://email:email@127.0.0.1:5433/email_automation_test"
 )
 os.environ["API_KEY"] = "test-api-key-0123456789"
 os.environ["GEMINI_API_KEY"] = "fake-key-never-used"
 # Blank = unset: tests read history from the DB unless a test wires an MCP client itself.
 os.environ["MCP_SERVER_URL"] = ""
 
+import json  # noqa: E402
+import logging  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 from collections.abc import Callable, Iterator  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
 from datetime import UTC, datetime  # noqa: E402
 
 import pytest  # noqa: E402
@@ -21,6 +24,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from app.api.deps import get_analyzer_factory  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
+from app.core.logging import JsonFormatter  # noqa: E402
 from app.db.models import Base  # noqa: E402
 from app.db.session import get_engine, get_sessionmaker  # noqa: E402
 from app.main import app  # noqa: E402
@@ -149,3 +153,29 @@ def make_processor(db, fake_analyzer):
     yield factory
     for db_session in sessions:
         db_session.close()
+
+
+class _ListHandler(logging.Handler):
+    """Formats in the emitting thread, so ContextVars are read where they were set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFormatter(JsonFormatter())
+        self.lines: list[dict] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(json.loads(self.format(record)))
+
+
+@contextmanager
+def captured_json_logs(logger_name: str = "") -> Iterator[list[dict]]:
+    handler = _ListHandler()
+    logger = logging.getLogger(logger_name)
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        yield handler.lines
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)

@@ -1,7 +1,12 @@
 import json
 import logging
 import sys
+from contextvars import ContextVar
 from datetime import UTC, datetime
+
+# Set per request by the MCP server from the caller's X-Correlation-ID header (the
+# backend sends the email's message_id), so both services' log lines can be joined.
+correlation_id: ContextVar[str | None] = ContextVar("correlation_id", default=None)
 
 # Only these `extra=` keys are emitted. Anything else (e.g. an email body passed by
 # mistake) is dropped, so sensitive data cannot leak into logs through `extra`.
@@ -20,6 +25,19 @@ ALLOWED_EXTRA_KEYS = frozenset(
         "status_code",
         "duration_ms",
         "outcome",
+        # Agent / LLM observability
+        "tool_name",
+        "round",
+        "provider",
+        "model",
+        "llm_calls",
+        "llm_retries",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "analysis_ms",
+        # MCP tool calls: names of the filters used, never their values
+        "filters",
     }
 )
 
@@ -32,6 +50,8 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "msg": record.getMessage(),
         }
+        if (current_correlation_id := correlation_id.get()) is not None:
+            payload["correlation_id"] = current_correlation_id
         payload.update(
             {key: value for key, value in record.__dict__.items() if key in ALLOWED_EXTRA_KEYS}
         )
