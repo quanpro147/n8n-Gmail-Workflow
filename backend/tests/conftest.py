@@ -6,6 +6,8 @@ os.environ["DATABASE_URL"] = os.environ.get(
 )
 os.environ["API_KEY"] = "test-api-key-0123456789"
 os.environ["GEMINI_API_KEY"] = "fake-key-never-used"
+# Blank = unset: tests read history from the DB unless a test wires an MCP client itself.
+os.environ["MCP_SERVER_URL"] = ""
 
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -130,7 +132,9 @@ def make_processor(db, fake_analyzer):
     """Build a processor with its own session and an optional fixed clock."""
     sessions: list[Session] = []
 
-    def factory(clock: Callable[[], datetime] | None = None, analyzer=None) -> EmailProcessor:
+    def factory(
+        clock: Callable[[], datetime] | None = None, analyzer=None, history_source=None
+    ) -> EmailProcessor:
         db_session = get_sessionmaker()()
         sessions.append(db_session)
         chosen = analyzer or fake_analyzer
@@ -139,6 +143,7 @@ def make_processor(db, fake_analyzer):
             lambda: chosen,
             get_settings(),
             clock or (lambda: datetime.now(UTC)),
+            history_source=history_source,
         )
 
     yield factory

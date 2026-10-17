@@ -49,6 +49,19 @@ class HistoryEntry:
     received_at: datetime
 
 
+@dataclass(frozen=True)
+class EmailSearchFilters:
+    """Optional filters for `EmailRepository.search`; `None` means "any"."""
+
+    sender_address: str | None = None
+    category: str | None = None
+    priority: str | None = None
+    action: str | None = None
+    status: str | None = None
+    received_after: datetime | None = None
+    received_before: datetime | None = None
+
+
 class NotificationUpdateError(Exception):
     """Raised when a notification result cannot be recorded for a record."""
 
@@ -232,3 +245,26 @@ class EmailRepository:
         # "idle in transaction" while waiting on the next LLM call.
         self._session.rollback()
         return records
+
+    def search(self, filters: EmailSearchFilters, *, limit: int) -> list[EmailRecord]:
+        """Newest-first records matching every given filter, at most `limit` rows."""
+        column_filters = {
+            EmailRecord.sender_address: filters.sender_address,
+            EmailRecord.category: filters.category,
+            EmailRecord.priority: filters.priority,
+            EmailRecord.action: filters.action,
+            EmailRecord.status: filters.status,
+        }
+        conditions = [column == value for column, value in column_filters.items() if value]
+        if filters.received_after is not None:
+            conditions.append(EmailRecord.received_at >= filters.received_after)
+        if filters.received_before is not None:
+            conditions.append(EmailRecord.received_at < filters.received_before)
+        return list(
+            self._session.scalars(
+                select(EmailRecord)
+                .where(*conditions)
+                .order_by(EmailRecord.received_at.desc(), EmailRecord.id.desc())
+                .limit(limit)
+            )
+        )

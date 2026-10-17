@@ -26,8 +26,30 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://email:${POSTGRES_PASSWORD:-email}@db:5432/email_automation
       TEST_DATABASE_URL: postgresql+psycopg://email:${POSTGRES_PASSWORD:-email}@db:5432/email_automation_test
+      # The agent's history tool goes through the MCP server (search_email_history).
+      MCP_SERVER_URL: http://mcp:8001/mcp
     ports:
       - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      mcp:
+        condition: service_started
+
+  # Read-only MCP server over the same records (get_email_details, search_email_history).
+  # Same image as the backend; needs MCP_API_KEY in backend/.env.
+  mcp:
+    build:
+      context: ./backend
+    command: ["python", "-m", "mcp_server"]
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://email:${POSTGRES_PASSWORD:-email}@db:5432/email_automation
+      MCP_HOST: 0.0.0.0   # inside the container; published on localhost only below
+      MCP_ALLOWED_HOSTS: "mcp:*"   # Host header the backend container sends
+    ports:
+      - "127.0.0.1:${MCP_HOST_PORT:-8001}:8001"
     depends_on:
       db:
         condition: service_healthy
